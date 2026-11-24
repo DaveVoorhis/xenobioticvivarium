@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Xenobiotic Vivarium — Procedural 3D Alife Terrarium</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap"
+    rel="stylesheet"
+  />
+</head>
+<body>
+  <div id="canvas-container"></div>
+
+  <div id="loading-overlay">
+    <div class="spinner-ring"></div>
+    <h1 class="loading-title">XENOBIOTIC VIVARIUM</h1>
+    <p class="loading-sub font-mono-tech">PROCEDURAL 3D ALIFE TERRARIUM</p>
+  </div>
+
+  <div id="toast-banner" class="glass-panel">Ready</div>
+  <div id="error-banner" class="hidden glass-panel font-mono-tech"></div>
+  <button id="show-hud-btn" class="hidden hud-btn">Show HUD (H)</button>
+
+  <div id="hud-root">
+    <div class="hud-top-row">
+      <!-- Top-Left: Brand + Organism Inspector -->
+      <div class="hud-left-col">
+        <div class="glass-panel header-brand-card">
+          <div class="brand-top">
+            <div class="brand-icon">
+              <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  stroke-width="2"
+                  d="M12 3c4.5 3.2 7 7.4 7 11a7 7 0 11-14 0c0-3.6 2.5-7.8 7-11z"
+                />
+              </svg>
+            </div>
+            <div>
+              <div class="brand-title">XENOBIOTIC VIVARIUM</div>
+              <div class="header-subtitle font-mono-tech">PROCEDURAL ALIFE TERRARIUM</div>
+            </div>
+          </div>
+
+          <div class="stats-strip font-mono-tech">
+            <span class="stat-chip text-cyan-200"><span class="stat-dot dot-cyan"></span>FAUNA <strong id="stat-animals">0</strong></span>
+            <span class="stat-chip text-emerald-200"><span class="stat-dot dot-emerald"></span>FLORA <strong id="stat-plants">0</strong></span>
+            <span class="stat-chip text-violet-200"><span class="stat-dot dot-violet"></span>FUNGI <strong id="stat-fungi">0</strong></span>
+            <span class="stat-chip text-amber-200"><span class="stat-dot dot-amber"></span>SPP <strong id="stat-species">0</strong></span>
+            <span class="text-emerald-300">CAIRN <strong id="stat-cairn-timer">20s</strong></span>
+            <span id="stat-solar" class="text-amber-200" title="Solar Phase">☀</span>
+            <span class="text-slate-400"><strong id="stat-fps" class="text-slate-200">60</strong> FPS</span>
+          </div>
+        </div>
+
+        <div id="inspector-card" class="hidden glass-panel thin-scroll">
+          <div class="insp-header">
+            <div style="min-width: 0;">
+              <div class="insp-badges">
+                <span id="insp-kind-badge" class="kind-badge font-mono-tech">FAUNA</span>
+                <span id="insp-gen-badge" class="font-mono-tech text-slate-300" style="font-size: 10px;">Gen 1</span>
+              </div>
+              <h2 id="insp-species-name" class="insp-name">Species Name</h2>
+              <div id="insp-stage-state" class="insp-stage font-mono-tech">Adult · Exploring</div>
+            </div>
+            <button id="insp-close-btn" class="hud-btn hud-btn-icon" title="Close Inspector">✕</button>
+          </div>
+
+          <div class="bars-stack">
+            <div>
+              <div class="bar-head font-mono-tech text-rose-200">
+                <span id="insp-bar1-label">HEALTH</span>
+                <span id="insp-bar1-val">100 / 100</span>
+              </div>
+              <div class="bar-track"><div id="insp-bar1-fill" class="bar-fill bar-hp" style="width: 100%;"></div></div>
+            </div>
+            <div>
+              <div class="bar-head font-mono-tech text-amber-200">
+                <span id="insp-bar2-label">ENERGY</span>
+                <span id="insp-bar2-val">90 / 120</span>
+              </div>
+              <div class="bar-track"><div id="insp-bar2-fill" class="bar-fill bar-en" style="width: 75%;"></div></div>
+            </div>
+            <div>
+              <div class="bar-head font-mono-tech text-cyan-200">
+                <span>LIFESPAN AGE</span>
+                <span id="insp-bar3-val">0s / 180s</span>
+              </div>
+              <div class="bar-track"><div id="insp-bar3-fill" class="bar-fill bar-age" style="width: 10%;"></div></div>
+            </div>
+          </div>
+
+          <div id="insp-traits-grid" class="traits-wrap"></div>
+
+          <div class="insp-meta-box font-mono-tech">
+            <span class="text-slate-400">Offspring: <strong id="insp-offspring" class="text-cyan-100">0</strong></span>
+            <span id="insp-optics" class="text-emerald-200">Optics</span>
+          </div>
+
+          <div class="btn-grid-3">
+            <button id="insp-nourish-btn" class="hud-btn text-emerald-200">+ Nourish</button>
+            <button id="insp-mutate-btn" class="hud-btn text-fuchsia-300">Mutate</button>
+            <button id="insp-next-btn" class="hud-btn text-cyan-200">Next ›</button>
+          </div>
+
+          <button id="insp-follow-btn" class="hud-btn w-full">
+            <span id="insp-follow-label">Follow Cam (F): OFF</span>
+          </button>
+
+          <div class="btn-grid-2">
+            <button id="insp-eyeview-btn" class="hud-btn">Eye View (V)</button>
+            <button id="insp-pip-btn" class="hud-btn">PiP Cam (P)</button>
+          </div>
+          <div id="insp-no-ocular-note" class="hidden font-mono-tech text-slate-400" style="font-size: 10px; text-align: center;">
+            No ocular organs
+          </div>
+        </div>
+      </div>
+
+      <!-- Top-Right: Toolbar, Telemetry & Drawers -->
+      <div class="hud-right-col">
+        <div id="top-toolbar" class="glass-panel">
+          <div class="toolbar-group font-mono-tech">
+            <button id="speed-0" class="hud-btn" title="Pause (Space)">0x</button>
+            <button id="speed-0.5" class="hud-btn">0.5x</button>
+            <button id="speed-1" class="hud-btn active-btn">1x</button>
+            <button id="speed-2" class="hud-btn">2x</button>
+            <button id="speed-4" class="hud-btn">4x</button>
+          </div>
+
+          <div class="toolbar-divider"></div>
+
+          <div class="toolbar-group">
+            <button id="btn-biogenesis" class="hud-btn text-cyan-200"><span class="stat-dot dot-cyan"></span>+ Animal</button>
+            <button id="btn-phytogenesis" class="hud-btn text-emerald-200"><span class="stat-dot dot-emerald"></span>+ Plant</button>
+            <button id="btn-mycogenesis" class="hud-btn text-violet-200"><span class="stat-dot dot-violet"></span>+ Fungus</button>
+            <button id="btn-feed" class="hud-btn text-amber-200" title="Drop Nutrient Fruit (G)">Feed (G)</button>
+          </div>
+
+          <div class="toolbar-divider"></div>
+
+          <div class="toolbar-group">
+            <button id="btn-codex" class="hud-btn" title="Species Codex (C)">Codex (C)</button>
+            <button id="btn-lab" class="hud-btn" title="Genesis Lab (E)">Lab (E)</button>
+            <button id="btn-audio" class="hud-btn" title="Terrarium Audio (M)">Audio (M)</button>
+            <button id="btn-hide-hud" class="hud-btn" title="Hide HUD (H)">HUD</button>
+          </div>
+        </div>
+
+        <div class="glass-panel telemetry-card">
+          <div class="telemetry-head font-mono-tech">
+            <span>VIVARIUM TELEMETRY</span>
+            <span>FAUNA · FLORA · FUNGI</span>
+          </div>
+          <canvas id="pop-graph-canvas" width="260" height="54"></canvas>
+          <div id="biosphere-feed" class="thin-scroll font-mono-tech"></div>
+        </div>
+
+        <!-- Species Codex Drawer -->
+        <div id="codex-drawer" class="hidden glass-panel side-drawer">
+          <div class="drawer-head">
+            <div>
+              <div class="drawer-title">SPECIES CODEX &amp; LINEAGE</div>
+              <div id="codex-count" class="font-mono-tech text-slate-400" style="font-size: 10px;">0 extant</div>
+            </div>
+            <button id="codex-close-btn" class="hud-btn hud-btn-icon">✕</button>
+          </div>
+          <div class="toolbar-group">
+            <button class="hud-btn active-btn" data-codex-filter="all">All</button>
+            <button class="hud-btn" data-codex-filter="fauna">Fauna</button>
+            <button class="hud-btn" data-codex-filter="flora">Flora</button>
+            <button class="hud-btn" data-codex-filter="fungus">Fungi</button>
+          </div>
+          <div id="codex-list" class="codex-list thin-scroll"></div>
+        </div>
+
+        <!-- Environment & Genesis Lab Drawer -->
+        <div id="lab-drawer" class="hidden glass-panel side-drawer thin-scroll">
+          <div class="drawer-head">
+            <div class="drawer-title">ENVIRONMENT &amp; GENESIS LAB</div>
+            <button id="lab-close-btn" class="hud-btn hud-btn-icon">✕</button>
+          </div>
+
+          <div class="lab-section">
+            <div class="lab-section-title font-mono-tech">Atmosphere &amp; Evolution</div>
+            <div class="lab-slider-row font-mono-tech">
+              <label><span>Solar Time</span><span id="lab-time-val">10:00</span></label>
+              <input id="lab-time-slider" type="range" min="0" max="1" step="0.01" value="0.42" />
+            </div>
+            <label class="lab-check-row"><input id="lab-autocycle-cb" type="checkbox" checked /> Auto Day/Night Cycle</label>
+            <div class="lab-slider-row font-mono-tech">
+              <label><span>Breeze &amp; Thermals</span><span id="lab-wind-val">65%</span></label>
+              <input id="lab-wind-slider" type="range" min="0" max="2" step="0.05" value="0.65" />
+            </div>
+            <div class="lab-slider-row font-mono-tech">
+              <label><span>Mutation Rate</span><span id="lab-mut-val">1.0x</span></label>
+              <input id="lab-mut-slider" type="range" min="0.2" max="3.0" step="0.1" value="1.0" />
+            </div>
+            <label class="lab-check-row"><input id="lab-autogen-cb" type="checkbox" checked /> Auto Mycelial Cairn Genesis</label>
+          </div>
+
+          <div class="lab-section">
+            <div class="lab-section-title font-mono-tech">Targeted Genesis</div>
+            <div class="btn-grid-2">
+              <button class="hud-btn text-cyan-200" data-spawn-plan="aerial_glider">+ Flyer</button>
+              <button class="hud-btn text-cyan-200" data-spawn-plan="hexapod_walker">+ Walker</button>
+              <button class="hud-btn text-cyan-200" data-spawn-plan="armored_crawler">+ Crawler</button>
+              <button class="hud-btn text-cyan-200" data-spawn-plan="serpentine_slitherer">+ Slitherer</button>
+              <button class="hud-btn text-cyan-200" data-spawn-plan="spring_bouncer">+ Bouncer</button>
+              <button class="hud-btn text-emerald-200" data-spawn-flora="pitcher_trap">+ Pitcher Trap</button>
+              <button class="hud-btn text-violet-200" data-spawn-flora="parasol_mushroom">+ Mushroom</button>
+              <button class="hud-btn text-violet-200" data-spawn-flora="puffball_mycelium">+ Puffball</button>
+            </div>
+          </div>
+
+          <div class="lab-section">
+            <div class="lab-section-title font-mono-tech">Terrarium Presets</div>
+            <div id="lab-presets" style="display: flex; flex-direction: column; gap: 5px;"></div>
+          </div>
+
+          <div class="lab-section">
+            <div class="lab-section-title font-mono-tech">Snapshot Persistence</div>
+            <div class="btn-grid-2">
+              <button id="lab-export-btn" class="hud-btn">Export JSON</button>
+              <button id="lab-import-btn" class="hud-btn">Import JSON</button>
+            </div>
+            <input id="lab-import-file" type="file" accept="application/json" class="hidden" />
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Picture-in-Picture Creature Eye-Cam -->
+  <div id="pip-eye-box" class="hidden glass-panel">
+    <div class="pip-header font-mono-tech">
+      <span id="pip-eye-label" class="text-emerald-200">Eye-Cam</span>
+      <div class="toolbar-group">
+        <button id="pip-expand-btn" class="hud-btn hud-btn-icon" title="Fullscreen (V)">⤢</button>
+        <button id="pip-close-btn" class="hud-btn hud-btn-icon" title="Close PiP">✕</button>
+      </div>
+    </div>
+    <div id="pip-eye-viewport">
+      <canvas id="pip-eye-canvas"></canvas>
+    </div>
+  </div>
+
+  <!-- Fullscreen Creature Eye View HUD -->
+  <div id="full-eye-hud" class="hidden">
+    <canvas id="full-eye-canvas"></canvas>
+    <div class="glass-panel full-eye-bar font-mono-tech">
+      <div>
+        <div id="full-eye-title" style="font-size: 13px; font-weight: 600;">Species</div>
+        <div id="full-eye-meta" class="text-emerald-200" style="font-size: 10px;">Optics</div>
+      </div>
+      <button id="full-eye-optics-btn" class="hud-btn">Toggle Optics</button>
+      <button id="full-eye-exit-btn" class="hud-btn text-rose-200">Exit (Esc)</button>
+    </div>
+  </div>
+
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>
