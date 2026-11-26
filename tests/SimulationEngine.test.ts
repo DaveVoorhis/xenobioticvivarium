@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { describe, expect, it } from 'vitest';
+import { TERRARIUM } from '../src/core/config';
 import { EventBus } from '../src/core/EventBus';
 import { getTerrainHeight, isFiniteVec3 } from '../src/core/math';
 import { createAnimalGenome } from '../src/genetics/AnimalGenetics';
@@ -7,12 +8,36 @@ import { createPlantGenome } from '../src/genetics/PlantGenetics';
 import { SimulationEngine } from '../src/simulation/SimulationEngine';
 
 describe('SimulationEngine', () => {
-  it('seeds all 5 locomotion classes plus both plants and fungi across all presets', () => {
+  it('emits all 5 locomotion classes from the cairn plus seeds plants and fungi across all presets', () => {
     const events = new EventBus();
     const sim = new SimulationEngine(events);
+    const spawnDistancesToCairn: number[] = [];
+    events.on('entity:spawned', ({ entity }) => {
+      if (entity.kind === 'animal') {
+        const dHoriz = Math.hypot(
+          entity.position.x - TERRARIUM.cairnPos.x,
+          entity.position.z - TERRARIUM.cairnPos.z
+        );
+        spawnDistancesToCairn.push(dHoriz);
+      }
+    });
 
     for (const preset of ['lush_terrarium', 'twilight_mycelium', 'apex_canopy'] as const) {
+      spawnDistancesToCairn.length = 0;
       sim.seedPreset(preset);
+      expect(sim.pendingCairnEmissions.length).toBeGreaterThan(20);
+
+      let guard = 0;
+      while (sim.pendingCairnEmissions.length > 0 && guard < 300) {
+        sim.step(0.05);
+        guard++;
+      }
+      expect(sim.pendingCairnEmissions.length).toBe(0);
+      expect(spawnDistancesToCairn.length).toBeGreaterThan(20);
+      for (const d of spawnDistancesToCairn) {
+        expect(d).toBeLessThan(0.5);
+      }
+
       const locomotions = new Set(sim.animals.map((a) => a.genome.locomotion));
       expect(locomotions).toEqual(new Set(['flying', 'walking', 'crawling', 'slithering', 'bouncing']));
 
@@ -56,6 +81,61 @@ describe('SimulationEngine', () => {
       const fl = getTerrainHeight(groundMover.position.x, groundMover.position.z);
       expect(Math.abs(groundMover.position.y - fl)).toBeLessThan(1.1);
       expect(isFiniteVec3(groundMover.position)).toBe(true);
+    }
+  });
+
+  it('produces zero-slip path-following serpenoid S-curves for slithering creatures', () => {
+    const sim = new SimulationEngine(new EventBus());
+    sim.env.autoGenesisEnabled = false;
+
+    const genome = createAnimalGenome('Omnivore', 'serpentine_slitherer');
+    const slitherer = sim.spawnAnimal(genome, new THREE.Vector3(0, 0.5, 0), 'adult')!;
+    slitherer.wanderDir.set(1, 0, 0);
+    slitherer.wanderTimer = 20;
+    slitherer.velocity.set(genome.speed, 0, 0);
+
+    const initialPhase = slitherer.slitherPhase;
+    for (let i = 0; i < 60; i++) {
+      sim.step(0.05);
+    }
+
+    // Phase advances with arc-length movement
+    expect(slitherer.slitherPhase).not.toBeCloseTo(initialPhase, 2);
+
+    const spine = slitherer.slitherSpine!;
+    expect(spine).toBeDefined();
+    expect(spine.length).toBeGreaterThanOrEqual(9);
+
+    // Compute max lateral deviation of body segments from the straight head-to-tail chord (true S-curve!)
+    const head = spine[0];
+    const tail = spine[spine.length - 1];
+    const chordX = tail.x - head.x;
+    const chordZ = tail.z - head.z;
+    const chordLen = Math.hypot(chordX, chordZ);
+    expect(chordLen).toBeGreaterThan(0.4);
+
+    let maxLateralDev = 0;
+    for (let i = 1; i < spine.length - 1; i++) {
+      const pt = spine[i];
+      expect(isFiniteVec3(pt)).toBe(true);
+      // Each grounded segment conforms tightly to local terrain height
+      const segFloor = getTerrainHeight(pt.x, pt.z);
+      expect(Math.abs(pt.y - segFloor)).toBeLessThan(0.25);
+
+      // Perpendicular distance to head-tail chord
+      const relX = pt.x - head.x;
+      const relZ = pt.z - head.z;
+      const lat = Math.abs(relX * chordZ - relZ * chordX) / chordLen;
+      if (lat > maxLateralDev) maxLateralDev = lat;
+    }
+    expect(maxLateralDev).toBeGreaterThan(0.06);
+
+    // Consecutive spine segments stay cleanly spaced (no stretching or collapsing)
+    const expectedStep = 0.21 * slitherer.scale * (genome.bodyElongation ?? 1.0);
+    for (let i = 2; i < spine.length; i++) {
+      const d = spine[i].distanceTo(spine[i - 1]);
+      expect(d).toBeGreaterThan(expectedStep * 0.72);
+      expect(d).toBeLessThan(expectedStep * 1.28);
     }
   });
 

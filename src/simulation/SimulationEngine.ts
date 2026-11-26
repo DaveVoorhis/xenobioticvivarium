@@ -17,6 +17,7 @@ import {
   randChoice,
   randRange,
   randomWeightedPointInTerrarium,
+  safeOrientToward,
 } from '../core/math';
 import { SpatialHashGrid } from '../core/SpatialHashGrid';
 import {
@@ -51,7 +52,7 @@ import {
   getPlantStageLabel,
   getStageDisplayLabel,
 } from './lifecycle';
-import { AnimalBehaviorSystem } from './systems/AnimalBehaviorSystem';
+import { AnimalBehaviorSystem, initSlitherSpine } from './systems/AnimalBehaviorSystem';
 import { LifecycleSystem } from './systems/LifecycleSystem';
 import { PlantEcologySystem } from './systems/PlantEcologySystem';
 import type {
@@ -67,6 +68,23 @@ import type {
   PropaguleEntity,
   SimulationSnapshot,
 } from './types';
+
+export interface SpawnAnimalOptions {
+  preserveY?: boolean;
+  initialVelocity?: THREE.Vector3;
+  wanderDir?: THREE.Vector3;
+  wanderTimer?: number;
+  grounded?: boolean;
+  emergeAnim?: number;
+  fromCairn?: boolean;
+}
+
+export interface PendingCairnEmission {
+  genome: AnimalGenome;
+  stage: AnimalLifeStage;
+  azimuth: number;
+  launchIndex: number;
+}
 
 export interface SimulationContext {
   readonly events: EventBus;
@@ -84,7 +102,12 @@ export interface SimulationContext {
   readonly foodGrid: SpatialHashGrid<Entity>;
   readonly plantSystem: PlantEcologySystem;
   log(message: string, category: LogCategory, toneClass?: string): void;
-  spawnAnimal(genome: AnimalGenome, pos: THREE.Vector3, initialStage?: AnimalLifeStage): AnimalEntity | null;
+  spawnAnimal(
+    genome: AnimalGenome,
+    pos: THREE.Vector3,
+    initialStage?: AnimalLifeStage,
+    options?: SpawnAnimalOptions
+  ): AnimalEntity | null;
   spawnPlant(genome: PlantGenome, x: number, z: number, initialGrowth?: number): PlantEntity | null;
   spawnEgg(genome: AnimalGenome, pos: THREE.Vector3): EggEntity | null;
   spawnPropagule(
@@ -121,6 +144,7 @@ export class SimulationEngine implements SimulationContext {
   readonly foodPellets: FoodPelletEntity[] = [];
   readonly nutrientPatches: NutrientPatch[] = [];
   readonly history: PopulationSample[] = [];
+  readonly pendingCairnEmissions: PendingCairnEmission[] = [];
 
   readonly animalGrid = new SpatialHashGrid<AnimalEntity>(4.0);
   readonly plantGrid = new SpatialHashGrid<PlantEntity>(4.0);
@@ -137,6 +161,8 @@ export class SimulationEngine implements SimulationContext {
 
   private nextEntityId = 1;
   private historyTimer = 0;
+  private cairnEmitTimer = 0;
+  private cairnAzimuthCursor = randRange(0, Math.PI * 2);
   private readonly _foodCombined: Entity[] = [];
 
   constructor(events: EventBus) {
@@ -172,7 +198,8 @@ export class SimulationEngine implements SimulationContext {
   spawnAnimal(
     rawGenome: AnimalGenome,
     pos: THREE.Vector3,
-    initialStage: AnimalLifeStage = 'adult'
+    initialStage: AnimalLifeStage = 'adult',
+    options?: SpawnAnimalOptions
   ): AnimalEntity | null {
     if (this.animals.length >= CAPS.maxAnimals) return null;
     const genome = normalizeAnimalGenome(rawGenome);
@@ -183,15 +210,33 @@ export class SimulationEngine implements SimulationContext {
     const safePos = pos.clone();
     clampToTerrariumRadius(safePos, 1.0);
     const floorY = getTerrainHeight(safePos.x, safePos.z);
-    if (genome.locomotion === 'flying') {
+    if (options?.preserveY) {
+      safePos.y = clamp(safePos.y, floorY + 0.1 * scale, TERRARIUM.canopyY - 0.8);
+    } else if (genome.locomotion === 'flying') {
       safePos.y = clamp(Math.max(safePos.y, floorY + 2.0), floorY + 1.2, TERRARIUM.canopyY - 1.4);
     } else {
       safePos.y = floorY + 0.25 * scale;
     }
 
     const ang = Math.random() * Math.PI * 2;
-    const wanderDir = new THREE.Vector3(Math.cos(ang), 0, Math.sin(ang));
-    const quat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), ang);
+    const wanderDir = options?.wanderDir
+      ? options.wanderDir.clone()
+      : new THREE.Vector3(Math.cos(ang), 0, Math.sin(ang));
+    if (wanderDir.lengthSq() < 1e-6) {
+      wanderDir.set(Math.cos(ang), 0, Math.sin(ang));
+    } else {
+      wanderDir.normalize();
+    }
+    const initialVel = options?.initialVelocity
+      ? options.initialVelocity.clone()
+      : wanderDir.clone().multiplyScalar(genome.speed * 0.35);
+    const quat = new THREE.Quaternion();
+    const orientDir = initialVel.lengthSq() > 1e-4 ? initialVel : wanderDir;
+    safeOrientToward(quat, orientDir, 1.0, 0);
+    const heading =
+      Math.hypot(initialVel.x, initialVel.z) > 1e-4
+        ? Math.atan2(initialVel.z, initialVel.x)
+        : Math.atan2(wanderDir.z, wanderDir.x);
 
     const animal: AnimalEntity = {
       id: this.allocateEntityId(),
@@ -201,7 +246,7 @@ export class SimulationEngine implements SimulationContext {
       position: safePos.clone(),
       lastValidPos: safePos.clone(),
       quaternion: quat,
-      velocity: wanderDir.clone().multiplyScalar(genome.speed * 0.35),
+      velocity: initialVel,
       scale,
       age: initialStage === 'adult' ? randRange(8, 28) : initialStage === 'elder' ? genome.maxAge * 0.82 : 0,
       stage: getStageDisplayLabel(genome, initialStage, maturity),
@@ -214,6 +259,7 @@ export class SimulationEngine implements SimulationContext {
       lifeStage: initialStage,
       instarRank: getInstarRank(maturity),
       moltAnim: 0,
+      emergeAnim: options?.emergeAnim ?? 0,
       elderRatio: initialStage === 'elder' ? 0.5 : 0,
       activeTarget: null,
       offspringCount: 0,
@@ -232,7 +278,7 @@ export class SimulationEngine implements SimulationContext {
       mouthMorselMaxTimer: 1,
       mouthMorselColor: 0xffffff,
       mouthMorselKind: 'flesh',
-      grounded: genome.locomotion !== 'flying',
+      grounded: options?.grounded ?? genome.locomotion !== 'flying',
       hopTimer: randRange(0.25, 1.1),
       hopCrouch: 0,
       hopSquash: 0,
@@ -244,10 +290,15 @@ export class SimulationEngine implements SimulationContext {
       wingPhase: randRange(0, Math.PI * 2),
       gaitPhase: randRange(0, Math.PI * 2),
       slitherPhase: randRange(0, Math.PI * 2),
+      slitherHeading: heading,
       speedRatio: 0.5,
       wanderDir,
-      wanderTimer: randRange(1.5, 4.5),
+      wanderTimer: options?.wanderTimer ?? randRange(1.5, 4.5),
     };
+
+    if (genome.locomotion === 'slithering') {
+      initSlitherSpine(animal, !!options?.fromCairn);
+    }
 
     this.animals.push(animal);
     this.speciesRegistry.registerAnimalBirth(genome, this.simTime);
@@ -511,36 +562,98 @@ export class SimulationEngine implements SimulationContext {
     this.events.emit('entity:disposed', { entity });
   }
 
+  emitAnimalFromCairn(
+    rawGenome: AnimalGenome,
+    initialStage: AnimalLifeStage = 'adult',
+    options?: {
+      azimuth?: number;
+      emitShockwave?: boolean;
+      emitAudio?: boolean;
+      logGenesis?: boolean;
+    }
+  ): AnimalEntity | null {
+    if (this.animals.length >= CAPS.maxAnimals) return null;
+    const genome = normalizeAnimalGenome(rawGenome);
+    const az =
+      options?.azimuth !== undefined
+        ? options.azimuth
+        : (this.cairnAzimuthCursor = (this.cairnAzimuthCursor + 2.39996323 + randRange(-0.22, 0.22)) % (Math.PI * 2));
+    const dirX = Math.cos(az);
+    const dirZ = Math.sin(az);
+
+    const cairnBaseY = getTerrainHeight(TERRARIUM.cairnPos.x, TERRARIUM.cairnPos.z);
+    const jitterR = randRange(0.08, 0.26);
+    const spawnPos = new THREE.Vector3(
+      TERRARIUM.cairnPos.x + dirX * jitterR,
+      cairnBaseY + (genome.locomotion === 'flying' ? randRange(1.45, 1.95) : 1.24),
+      TERRARIUM.cairnPos.z + dirZ * jitterR
+    );
+
+    const initialVelocity = new THREE.Vector3();
+    const wanderDir = new THREE.Vector3(dirX, 0, dirZ);
+    if (genome.locomotion === 'flying') {
+      const spd = genome.speed * randRange(1.08, 1.38);
+      initialVelocity.set(dirX * spd, randRange(2.4, 3.9), dirZ * spd);
+      wanderDir.set(dirX, randRange(0.06, 0.22), dirZ).normalize();
+    } else if (genome.locomotion === 'bouncing') {
+      const spd = genome.speed * randRange(1.25, 1.62);
+      initialVelocity.set(dirX * spd, randRange(4.8, 6.4), dirZ * spd);
+    } else {
+      // Walkers, crawlers, and slitherers arc cleanly out over the cairn basalt ring onto the mossy slope
+      const horizLaunch = randRange(2.9, 4.35);
+      const vertLaunch = randRange(3.5, 4.75);
+      initialVelocity.set(dirX * horizLaunch, vertLaunch, dirZ * horizLaunch);
+    }
+
+    const animal = this.spawnAnimal(genome, spawnPos, initialStage, {
+      preserveY: true,
+      initialVelocity,
+      wanderDir,
+      wanderTimer: randRange(3.2, 5.8),
+      grounded: false,
+      emergeAnim: 1.0,
+      fromCairn: true,
+    });
+
+    if (animal) {
+      this.cairnPulseEnergy = 1.0;
+      if (options?.emitShockwave ?? true) {
+        this.events.emit('fx:shockwave', {
+          position: new THREE.Vector3(TERRARIUM.cairnPos.x, cairnBaseY + 1.15, TERRARIUM.cairnPos.z),
+          colorHex: genome.glowHex,
+          maxScale: 4.4,
+        });
+      }
+      this.events.emit('fx:burst', {
+        position: spawnPos.clone(),
+        colorHex: genome.glowHex,
+        count: 10,
+        speed: 1.9,
+      });
+      if (options?.emitAudio ?? true) {
+        this.events.emit('audio:cue', { type: 'biogenesis' });
+      }
+      if (options?.logGenesis ?? false) {
+        this.log(
+          `Biogenesis: ${genome.speciesName} (${genome.locomotion} ${genome.diet.toLowerCase()})`,
+          'genesis',
+          'text-cyan-300'
+        );
+      }
+    }
+    return animal;
+  }
+
   triggerBiogenesis(
     forcedDiet: AnimalDiet | null = null,
     forcedPlan: AnimalBodyPlan | null = null
   ): AnimalEntity | null {
     const genome = createAnimalGenome(forcedDiet, forcedPlan);
-    const pos = TERRARIUM.cairnPos
-      .clone()
-      .add(new THREE.Vector3(randRange(-1.8, 1.8), 2.4, randRange(-1.8, 1.8)));
-    const animal = this.spawnAnimal(genome, pos, 'adult');
-    if (animal) {
-      this.cairnPulseEnergy = 1.0;
-      this.events.emit('fx:shockwave', {
-        position: TERRARIUM.cairnPos.clone().add(new THREE.Vector3(0, 1.4, 0)),
-        colorHex: genome.glowHex,
-        maxScale: 4.4,
-      });
-      this.events.emit('fx:burst', {
-        position: animal.position.clone(),
-        colorHex: genome.glowHex,
-        count: 14,
-        speed: 2.0,
-      });
-      this.events.emit('audio:cue', { type: 'biogenesis' });
-      this.log(
-        `Biogenesis: ${genome.speciesName} (${genome.locomotion} ${genome.diet.toLowerCase()})`,
-        'genesis',
-        'text-cyan-300'
-      );
-    }
-    return animal;
+    return this.emitAnimalFromCairn(genome, 'adult', {
+      emitShockwave: true,
+      emitAudio: true,
+      logGenesis: true,
+    });
   }
 
   triggerPhytogenesis(
@@ -677,15 +790,18 @@ export class SimulationEngine implements SimulationContext {
     this.foodPellets.length = 0;
     this.nutrientPatches.length = 0;
     this.history.length = 0;
+    this.pendingCairnEmissions.length = 0;
     this.speciesRegistry.clear();
     resetSpeciesIdCounter();
     this.simTime = 0;
     this.historyTimer = 0;
+    this.cairnEmitTimer = 0;
+    this.cairnAzimuthCursor = randRange(0, Math.PI * 2);
     this.genesisTimer = this.env.genesisInterval;
     this.events.emit('ecosystem:reset', {});
   }
 
-  seedPreset(presetId: EcosystemPresetId): void {
+  seedPreset(presetId: EcosystemPresetId, options?: { emitFromCairn?: boolean }): void {
     this.clearAll();
     const meta = ECOSYSTEM_PRESETS.find((p) => p.id === presetId) ?? ECOSYSTEM_PRESETS[0];
     this.env.timeOfDay = meta.timeOfDay;
@@ -768,27 +884,61 @@ export class SimulationEngine implements SimulationContext {
             { plan: 'spring_bouncer', diet: 'Fungivore', count: 3 },
           ];
 
-    for (const spec of faunaSpecs) {
-      const founder = createAnimalGenome(spec.diet, spec.plan);
-      const clusterCenter = randomWeightedPointInTerrarium(TERRARIUM.coreRadius * 0.72, TERRARIUM.radius * 0.72);
-      for (let i = 0; i < spec.count; i++) {
-        const x = clusterCenter.x + randRange(-2.6, 2.6);
-        const z = clusterCenter.z + randRange(-2.6, 2.6);
-        const y =
-          spec.plan === 'aerial_glider'
-            ? getTerrainHeight(x, z) + randRange(2.8, 6.8)
-            : getTerrainHeight(x, z) + 0.35;
-        const stage: AnimalLifeStage = i === spec.count - 1 && spec.count >= 4 ? 'larva' : 'adult';
-        this.spawnAnimal(founder, new THREE.Vector3(x, y, z), stage);
+    const emitFromCairn = options?.emitFromCairn ?? true;
+    const specFounders = faunaSpecs.map((spec) => ({
+      spec,
+      founder: createAnimalGenome(spec.diet, spec.plan),
+    }));
+
+    if (emitFromCairn) {
+      // Interleave species round-robin so all 5 locomotion classes emerge together in a lively genesis wave from the cairn
+      const maxCount = Math.max(...specFounders.map((sf) => sf.spec.count));
+      let launchIndex = 0;
+      for (let round = 0; round < maxCount; round++) {
+        for (const { spec, founder } of specFounders) {
+          if (round >= spec.count) continue;
+          const stage: AnimalLifeStage = round === spec.count - 1 && spec.count >= 4 ? 'larva' : 'adult';
+          const azimuth = (this.cairnAzimuthCursor + launchIndex * 2.39996323 + randRange(-0.18, 0.18)) % (Math.PI * 2);
+          this.pendingCairnEmissions.push({
+            genome: founder,
+            stage,
+            azimuth,
+            launchIndex,
+          });
+          launchIndex++;
+        }
+      }
+
+      this.cairnPulseEnergy = 1.0;
+      this.cairnEmitTimer = 0.18;
+      const cairnBaseY = getTerrainHeight(TERRARIUM.cairnPos.x, TERRARIUM.cairnPos.z);
+      this.events.emit('fx:shockwave', {
+        position: new THREE.Vector3(TERRARIUM.cairnPos.x, cairnBaseY + 1.15, TERRARIUM.cairnPos.z),
+        colorHex: 0x45f5c2,
+        maxScale: 5.2,
+      });
+    } else {
+      for (const { spec, founder } of specFounders) {
+        const clusterCenter = randomWeightedPointInTerrarium(TERRARIUM.coreRadius * 0.72, TERRARIUM.radius * 0.72);
+        for (let i = 0; i < spec.count; i++) {
+          const x = clusterCenter.x + randRange(-2.6, 2.6);
+          const z = clusterCenter.z + randRange(-2.6, 2.6);
+          const y =
+            spec.plan === 'aerial_glider'
+              ? getTerrainHeight(x, z) + randRange(2.8, 6.8)
+              : getTerrainHeight(x, z) + 0.35;
+          const stage: AnimalLifeStage = i === spec.count - 1 && spec.count >= 4 ? 'larva' : 'adult';
+          this.spawnAnimal(founder, new THREE.Vector3(x, y, z), stage);
+        }
       }
     }
 
     // Seed a few incubating eggs & nutrient patches for immediate lifecycle variety
-    for (let e = 0; e < 3 && e < this.animals.length; e++) {
-      const donor = this.animals[e * 4 % this.animals.length];
+    for (let e = 0; e < 3 && e < specFounders.length; e++) {
+      const donor = specFounders[(e * 3) % specFounders.length]?.founder;
       if (donor) {
         const pt = randomWeightedPointInTerrarium(TERRARIUM.coreRadius * 0.65, TERRARIUM.coreRadius * 0.8);
-        this.spawnEgg(donor.genome, new THREE.Vector3(pt.x, getTerrainHeight(pt.x, pt.z) + 0.14, pt.z));
+        this.spawnEgg(donor, new THREE.Vector3(pt.x, getTerrainHeight(pt.x, pt.z) + 0.14, pt.z));
       }
     }
     for (let n = 0; n < 4; n++) {
@@ -797,7 +947,13 @@ export class SimulationEngine implements SimulationContext {
     }
 
     this.recordHistorySample();
-    this.log(`Seeded ${meta.name}`, 'system', 'text-emerald-200');
+    this.log(
+      emitFromCairn
+        ? `Mycelial Cairn awakening — emitting ${this.pendingCairnEmissions.length} primordial organisms (${meta.name})`
+        : `Seeded ${meta.name}`,
+      'genesis',
+      'text-emerald-200'
+    );
   }
 
   step(dt: number): void {
@@ -807,6 +963,24 @@ export class SimulationEngine implements SimulationContext {
 
     if (this.env.dayNightAutoCycle) {
       this.env.timeOfDay = (this.env.timeOfDay + safeDt / Math.max(20, this.env.dayCycleDuration)) % 1.0;
+    }
+
+    // Emit queued initial ecosystem wave from the Mycelial Genesis Cairn
+    if (this.pendingCairnEmissions.length > 0) {
+      this.cairnPulseEnergy = Math.max(this.cairnPulseEnergy, 0.74);
+      this.cairnEmitTimer -= safeDt;
+      let emittedThisStep = 0;
+      while (this.cairnEmitTimer <= 0 && this.pendingCairnEmissions.length > 0 && emittedThisStep < 2) {
+        const next = this.pendingCairnEmissions.shift()!;
+        this.emitAnimalFromCairn(next.genome, next.stage, {
+          azimuth: next.azimuth,
+          emitShockwave: next.launchIndex % 4 === 0,
+          emitAudio: next.launchIndex % 4 === 0,
+          logGenesis: false,
+        });
+        emittedThisStep++;
+        this.cairnEmitTimer += randRange(0.16, 0.24);
+      }
     }
 
     // Rebuild spatial hash grids
@@ -825,7 +999,7 @@ export class SimulationEngine implements SimulationContext {
     this.lifecycleSystem.update(this, safeDt);
 
     // Automatic primordial genesis at the Mycelial Cairn
-    if (this.env.autoGenesisEnabled) {
+    if (this.env.autoGenesisEnabled && this.pendingCairnEmissions.length === 0) {
       this.genesisTimer -= safeDt;
       if (this.genesisTimer <= 0) {
         this.genesisTimer = Math.max(6, this.env.genesisInterval);
@@ -933,6 +1107,9 @@ export class SimulationEngine implements SimulationContext {
         entity.age = Math.max(0, an.age);
         entity.maturity = clamp(an.maturity, 0.05, 1.0);
         entity.offspringCount = an.offspringCount ?? 0;
+        if (entity.genome.locomotion === 'slithering') {
+          initSlitherSpine(entity, false);
+        }
       }
     }
     syncSpeciesIdCounter(maxSpId);

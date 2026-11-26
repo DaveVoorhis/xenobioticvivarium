@@ -27,6 +27,181 @@ import type { AnimalEntity, Entity, FoodPelletEntity, PlantEntity } from '../typ
 import type { SimulationContext } from '../SimulationEngine';
 
 const GRAVITY = 14.5;
+const SLITHER_TRAIL_POINTS = 64;
+
+export function getSlitherSegmentCount(a: AnimalEntity): number {
+  return clamp(Math.round(a.genome.segments), 8, 12);
+}
+
+function getSlitherStepSizes(a: AnimalEntity): {
+  bodyLenFactor: number;
+  neckStep: number;
+  segStep: number;
+  sampleStep: number;
+} {
+  const bodyLenFactor = Math.max(0.28, a.scale * (a.genome.bodyElongation ?? 1.0));
+  return {
+    bodyLenFactor,
+    neckStep: 0.14 * bodyLenFactor,
+    segStep: 0.21 * bodyLenFactor,
+    sampleStep: Math.max(0.035, 0.072 * bodyLenFactor),
+  };
+}
+
+function resampleSlitherSpine(a: AnimalEntity, dt: number, clearance: number): void {
+  const trail = a.slitherTrail;
+  const spine = a.slitherSpine;
+  if (!trail || !spine || trail.length < 2) return;
+
+  const segCount = spine.length - 1;
+  const { neckStep, segStep } = getSlitherStepSizes(a);
+
+  // Smoothly settle any elevated airborne trail points down onto the moss once grounded
+  if (a.grounded && dt > 0) {
+    const settleAlpha = clamp(dt * 5.8, 0, 1);
+    for (let i = 1; i < trail.length; i++) {
+      const pt = trail[i];
+      const floorY = getTerrainHeight(pt.x, pt.z) + clearance;
+      if (pt.y > floorY + 0.004) {
+        pt.y = THREE.MathUtils.lerp(pt.y, floorY, settleAlpha);
+      } else {
+        pt.y = floorY;
+      }
+    }
+  }
+
+  spine[0].copy(a.position);
+
+  let tIdx = 0;
+  let accumDist = 0;
+  for (let s = 1; s <= segCount; s++) {
+    const targetArc = neckStep + (s - 1) * segStep;
+    let placed = false;
+    while (tIdx < trail.length - 1) {
+      const p0 = trail[tIdx];
+      const p1 = trail[tIdx + 1];
+      const d = p0.distanceTo(p1);
+      if (accumDist + d >= targetArc && d > 1e-6) {
+        const frac = clamp((targetArc - accumDist) / d, 0, 1);
+        spine[s].lerpVectors(p0, p1, frac);
+        placed = true;
+        break;
+      }
+      accumDist += d;
+      tIdx++;
+    }
+    if (!placed) {
+      const last = trail[trail.length - 1];
+      const prev = trail[trail.length - 2];
+      const dx = last.x - prev.x;
+      const dy = last.y - prev.y;
+      const dz = last.z - prev.z;
+      const len = Math.hypot(dx, dy, dz);
+      const rem = Math.max(0, targetArc - accumDist);
+      if (len > 1e-5) {
+        spine[s].set(last.x + (dx / len) * rem, last.y + (dy / len) * rem, last.z + (dz / len) * rem);
+      } else {
+        spine[s].copy(last);
+      }
+    }
+
+    const t = (s - 1) / Math.max(1, segCount - 1);
+    const taper = 1.0 - Math.pow(t, 1.35) * 0.72;
+    const segClearance = (0.095 * taper + 0.025) * a.scale;
+    const segFloor = getTerrainHeight(spine[s].x, spine[s].z) + segClearance;
+    if (a.grounded && spine[s].y <= segFloor + 0.22) {
+      spine[s].y = segFloor;
+    } else {
+      spine[s].y = Math.max(segFloor, spine[s].y);
+    }
+  }
+}
+
+export function initSlitherSpine(a: AnimalEntity, fromCairn = false): void {
+  const segCount = getSlitherSegmentCount(a);
+  const { bodyLenFactor, sampleStep } = getSlitherStepSizes(a);
+  const clearance = 0.11 * a.scale;
+
+  if (!a.slitherTrail || a.slitherTrail.length !== SLITHER_TRAIL_POINTS) {
+    a.slitherTrail = [];
+    for (let i = 0; i < SLITHER_TRAIL_POINTS; i++) {
+      a.slitherTrail.push(new THREE.Vector3());
+    }
+  }
+  if (!a.slitherSpine || a.slitherSpine.length !== segCount + 1) {
+    a.slitherSpine = [];
+    for (let i = 0; i <= segCount; i++) {
+      a.slitherSpine.push(new THREE.Vector3());
+    }
+  }
+
+  const horizSpd = Math.hypot(a.velocity.x, a.velocity.z);
+  const heading = horizSpd > 0.05 ? Math.atan2(a.velocity.z, a.velocity.x) : a.slitherHeading;
+  a.slitherHeading = heading;
+
+  const freqFactor = clamp((a.genome.slitherFreq ?? 3.5) / 3.5, 0.78, 1.28);
+  const wavelength = (1.65 * bodyLenFactor) / freqFactor;
+  const k = (Math.PI * 2) / Math.max(0.5, wavelength);
+  const swingAmp = 0.65;
+
+  let cx = a.position.x;
+  let cy = a.position.y;
+  let cz = a.position.z;
+  a.slitherTrail[0].set(cx, cy, cz);
+
+  for (let i = 1; i < SLITHER_TRAIL_POINTS; i++) {
+    if (fromCairn) {
+      const backAngle = heading + Math.PI + Math.sin(a.slitherPhase - i * sampleStep * k) * 0.26;
+      cx += Math.cos(backAngle) * sampleStep * 0.42;
+      cz += Math.sin(backAngle) * sampleStep * 0.42;
+      const fl = getTerrainHeight(cx, cz) + clearance;
+      cy = Math.max(fl, cy - sampleStep * 0.65);
+    } else {
+      const backAngle = heading + Math.PI + Math.sin(a.slitherPhase - i * sampleStep * k) * swingAmp;
+      cx += Math.cos(backAngle) * sampleStep;
+      cz += Math.sin(backAngle) * sampleStep;
+      cy = getTerrainHeight(cx, cz) + clearance;
+    }
+    a.slitherTrail[i].set(cx, cy, cz);
+  }
+
+  resampleSlitherSpine(a, 0, clearance);
+}
+
+function recordSlitherTrailPoint(a: AnimalEntity, dt: number, clearance: number): void {
+  const segCount = getSlitherSegmentCount(a);
+  if (
+    !a.slitherTrail ||
+    a.slitherTrail.length !== SLITHER_TRAIL_POINTS ||
+    !a.slitherSpine ||
+    a.slitherSpine.length !== segCount + 1
+  ) {
+    initSlitherSpine(a, !a.grounded);
+    return;
+  }
+
+  const trail = a.slitherTrail;
+  const { sampleStep } = getSlitherStepSizes(a);
+  const jumpDist = a.position.distanceTo(trail[0]);
+  if (!Number.isFinite(jumpDist) || jumpDist > 2.8) {
+    initSlitherSpine(a, !a.grounded);
+    return;
+  }
+
+  trail[0].copy(a.position);
+  let distToAnchor = trail[0].distanceTo(trail[1]);
+  let guard = 0;
+  while (distToAnchor >= sampleStep && guard < 6) {
+    guard++;
+    const recycled = trail.pop()!;
+    const frac = clamp(sampleStep / distToAnchor, 0, 1);
+    recycled.lerpVectors(trail[1], trail[0], frac);
+    trail.splice(1, 0, recycled);
+    distToAnchor = trail[0].distanceTo(trail[1]);
+  }
+
+  resampleSlitherSpine(a, dt, clearance);
+}
 
 export class AnimalBehaviorSystem {
   private readonly _steer = new THREE.Vector3();
@@ -46,7 +221,10 @@ export class AnimalBehaviorSystem {
   private readonly _qFood: Entity[] = [];
 
   private computeMouthPos(a: AnimalEntity, out: THREE.Vector3): THREE.Vector3 {
-    const snoutZ = 0.54 * a.scale * (a.genome.bodyElongation ?? 1.0);
+    const snoutZ =
+      a.genome.bodyPlan === 'serpentine_slitherer'
+        ? 0.44 * a.scale
+        : 0.54 * a.scale * (a.genome.bodyElongation ?? 1.0);
     out.set(0, 0, snoutZ).applyQuaternion(a.quaternion).add(a.position);
     return out;
   }
@@ -525,6 +703,7 @@ export class AnimalBehaviorSystem {
       a.lungeAnim = Math.max(0, a.lungeAnim - dt * 2.2);
       a.thrashAnim = Math.max(0, a.thrashAnim - dt * 2.1);
       a.moltAnim = Math.max(0, a.moltAnim - dt * 1.1);
+      a.emergeAnim = Math.max(0, a.emergeAnim - dt * 2.8);
       a.courtshipAnim = Math.max(0, a.courtshipAnim - dt * 1.2);
       a.pollenTimer = Math.max(0, a.pollenTimer - dt);
       a.hopSquash = Math.max(0, a.hopSquash - dt * 3.8);
@@ -1096,36 +1275,108 @@ export class AnimalBehaviorSystem {
       return;
     }
 
-    // === 3. WALKING / 4. CRAWLING / 5. SLITHERING: Terrain-conforming ground locomotion ===
+    if (g.locomotion === 'slithering') {
+      // === 3. SLITHERING: True Hirose serpenoid lateral undulation + zero-slip world-space spine trail ===
+      this._steer.y = 0;
+
+      if (!a.grounded) {
+        // Airborne emergence arc out of the Genesis Cairn (or knockback)
+        a.velocity.y -= GRAVITY * dt;
+        a.position.addScaledVector(a.velocity, dt);
+        clampToTerrariumRadius(a.position, 0.9);
+        const newFloor = getTerrainHeight(a.position.x, a.position.z) + clearance;
+        if (a.position.y <= newFloor) {
+          a.position.y = newFloor;
+          a.velocity.y = 0;
+          a.grounded = true;
+        }
+        const hSpdAir = Math.hypot(a.velocity.x, a.velocity.z);
+        if (hSpdAir > 0.08) {
+          a.slitherHeading = Math.atan2(a.velocity.z, a.velocity.x);
+          this._desired.set(a.velocity.x, clamp(a.velocity.y * 0.32, -1.4, 1.4), a.velocity.z);
+          safeOrientToward(a.quaternion, this._desired, clamp(dt * 7.5, 0, 1), 0);
+        }
+        a.speedRatio = clamp(hSpdAir / Math.max(0.5, g.speed), 0.1, 1.65);
+        recordSlitherTrailPoint(a, dt, clearance);
+        return;
+      }
+
+      if (this._steer.lengthSq() > 1e-6) {
+        this._steer.normalize().multiplyScalar(targetSpeed);
+        a.velocity.x = THREE.MathUtils.lerp(a.velocity.x, this._steer.x, clamp(dt * 4.2, 0, 1));
+        a.velocity.z = THREE.MathUtils.lerp(a.velocity.z, this._steer.z, clamp(dt * 4.2, 0, 1));
+      } else {
+        a.velocity.x *= Math.pow(0.18, dt);
+        a.velocity.z *= Math.pow(0.18, dt);
+      }
+
+      const horizSpd = Math.hypot(a.velocity.x, a.velocity.z);
+      const meanAngle = horizSpd > 0.04 ? Math.atan2(a.velocity.z, a.velocity.x) : a.slitherHeading;
+      a.slitherHeading = meanAngle;
+
+      // Spatial phase strictly coupled to ground arc-length traveled (zero skating/sliding!)
+      const { bodyLenFactor } = getSlitherStepSizes(a);
+      const freqFactor = clamp((g.slitherFreq ?? 3.5) / 3.5, 0.78, 1.28) * clamp(gaitFreqMult, 0.75, 1.25);
+      const wavelength = (1.65 * bodyLenFactor) / freqFactor;
+      const k = (Math.PI * 2) / Math.max(0.5, wavelength);
+      const moveFactor = clamp(horizSpd / Math.max(0.35, g.speed * 0.45), 0, 1.3);
+      const swingAmp = (wantsAmbushCrouch ? 0.4 : 0.78) * clamp(moveFactor, 0.22, 1.12);
+      // Subtle concertina push-stroke velocity surge synchronized with lateral flank pushes
+      const pushPulse = 1.0 + Math.cos(a.slitherPhase * 2.0) * 0.13 * clamp(moveFactor, 0, 1);
+      const pathComp = 1.0 / Math.max(0.72, Math.cos(swingAmp * 0.68));
+      const arcSpeed = horizSpd * pushPulse * pathComp;
+      const ds = arcSpeed * dt;
+
+      if (ds > 1e-5) {
+        a.slitherPhase = (a.slitherPhase + ds * k) % (Math.PI * 200);
+        const serpAngle = meanAngle + Math.sin(a.slitherPhase) * swingAmp;
+        a.position.x += Math.cos(serpAngle) * ds;
+        a.position.z += Math.sin(serpAngle) * ds;
+      }
+
+      clampToTerrariumRadius(a.position, 0.9);
+      a.position.y = getTerrainHeight(a.position.x, a.position.z) + clearance;
+      a.velocity.y = 0;
+
+      // Stabilized predatory head orientation: sweeps smoothly (~38% of body S-curve) while tracking terrain slope
+      getTerrainNormal(a.position.x, a.position.z, this._groundNormal);
+      if (horizSpd > 0.06) {
+        const headAngle = meanAngle + Math.sin(a.slitherPhase) * swingAmp * 0.34;
+        const aheadX = a.position.x + Math.cos(headAngle) * 0.35;
+        const aheadZ = a.position.z + Math.sin(headAngle) * 0.35;
+        const aheadY = getTerrainHeight(aheadX, aheadZ) + clearance;
+        const headLift = a.activeTarget?.role === 'prey' ? 0.045 : 0.015;
+        this._desired.set(aheadX - a.position.x, aheadY - a.position.y + headLift, aheadZ - a.position.z);
+        safeOrientToward(a.quaternion, this._desired, clamp(dt * 9.0, 0, 1), 0, this._groundNormal);
+      }
+
+      a.speedRatio = clamp(horizSpd / Math.max(0.5, g.speed), 0, 1.65);
+      recordSlitherTrailPoint(a, dt, clearance);
+      return;
+    }
+
+    // === 4. WALKING / 5. CRAWLING: Terrain-conforming ground locomotion ===
     this._steer.y = 0;
-    if (this._steer.lengthSq() > 1e-6) {
+    if (a.grounded && this._steer.lengthSq() > 1e-6) {
       this._steer.normalize().multiplyScalar(targetSpeed);
-      const accel = g.locomotion === 'walking' ? 4.8 : g.locomotion === 'slithering' ? 3.8 : 4.2;
+      const accel = g.locomotion === 'walking' ? 4.8 : 4.2;
       a.velocity.x = THREE.MathUtils.lerp(a.velocity.x, this._steer.x, clamp(dt * accel, 0, 1));
       a.velocity.z = THREE.MathUtils.lerp(a.velocity.z, this._steer.z, clamp(dt * accel, 0, 1));
     }
 
-    // Serpentine lateral micro-weave for slithering motion
-    if (g.locomotion === 'slithering' && !wantsAmbushCrouch) {
-      const weave = Math.sin(a.slitherPhase) * 0.35 * targetSpeed;
-      const spdH = Math.hypot(a.velocity.x, a.velocity.z);
-      if (spdH > 0.15) {
-        const perpX = -a.velocity.z / spdH;
-        const perpZ = a.velocity.x / spdH;
-        a.position.x += perpX * weave * dt * 0.45;
-        a.position.z += perpZ * weave * dt * 0.45;
-      }
-    }
-
-    // Handle occasional airborne knockback or ambush pounce
+    // Handle airborne emergence from cairn, knockback, or ambush pounce
     if (!a.grounded) {
       a.velocity.y -= GRAVITY * dt;
       a.position.addScaledVector(a.velocity, dt);
+      clampToTerrariumRadius(a.position, 0.9);
       const newFloor = getTerrainHeight(a.position.x, a.position.z) + clearance;
       if (a.position.y <= newFloor) {
         a.position.y = newFloor;
         a.velocity.y = 0;
         a.grounded = true;
+      } else {
+        this._desired.set(a.velocity.x, clamp(a.velocity.y * 0.25, -1.2, 1.2), a.velocity.z);
+        safeOrientToward(a.quaternion, this._desired, clamp(dt * 6.5, 0, 1), 0);
       }
     } else {
       a.position.x += a.velocity.x * dt;
@@ -1140,12 +1391,12 @@ export class AnimalBehaviorSystem {
 
     // Project horizontal velocity onto terrain slope tangent for natural uphill/downhill pitch
     const horizSpd = Math.hypot(a.velocity.x, a.velocity.z);
-    if (horizSpd > 0.08) {
+    if (a.grounded && horizSpd > 0.08) {
       const aheadX = a.position.x + (a.velocity.x / horizSpd) * 0.35;
       const aheadZ = a.position.z + (a.velocity.z / horizSpd) * 0.35;
       const aheadY = getTerrainHeight(aheadX, aheadZ) + clearance;
       this._desired.set(aheadX - a.position.x, aheadY - a.position.y, aheadZ - a.position.z);
-      const useNormal = g.locomotion === 'crawling' || g.locomotion === 'slithering' ? this._groundNormal : undefined;
+      const useNormal = g.locomotion === 'crawling' ? this._groundNormal : undefined;
       safeOrientToward(a.quaternion, this._desired, clamp(dt * 6.5, 0, 1), 0, useNormal);
     }
 

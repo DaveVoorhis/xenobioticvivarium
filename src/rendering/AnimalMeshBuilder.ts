@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { clamp, disableFrustumCulling } from '../core/math';
+import { clamp, disableFrustumCulling, getTerrainHeight, getTerrainNormal, safeNormalize } from '../core/math';
 import type { AnimalGenome } from '../genetics/types';
 import type { AnimalEntity, CorpseEntity } from '../simulation/types';
 import { getGeometryLibrary } from './GeometryLibrary';
@@ -24,6 +24,8 @@ export interface ArticulatedLeg {
 export interface ArticulatedAnimalRig {
   group: THREE.Group;
   bodyRoot: THREE.Group;
+  spineContainer: THREE.Group | null;
+  isSerpentine: boolean;
   materials: THREE.Material[];
   bodyMat: THREE.MeshPhysicalMaterial;
   accentMat: THREE.MeshPhysicalMaterial;
@@ -214,6 +216,8 @@ export function createAnimalRig(
   ];
 
   const segments: ArticulatedAnimalRig['segments'] = [];
+  let spineContainer: THREE.Group | null = null;
+  const isSerpentine = genome.bodyPlan === 'serpentine_slitherer';
   const wings: WingJoint[] = [];
   const legs: ArticulatedLeg[] = [];
   const springLegs: ArticulatedAnimalRig['springLegs'] = [];
@@ -349,40 +353,43 @@ export function createAnimalRig(
     headZ = 0.56;
     headY = 0.08;
     tailZ = 0.38 - (segCount - 1) * 0.24 - 0.18;
-  } else if (genome.bodyPlan === 'serpentine_slitherer') {
+  } else if (isSerpentine) {
     const head = new THREE.Mesh(geo.slitherHead, bodyMat);
-    head.position.set(0, 0.06, 0.36);
+    head.position.set(0, 0.06, 0.2);
     head.castShadow = true;
     bodyRoot.add(head);
 
-    const segCount = clamp(genome.segments, 8, 12);
-    let parentObj: THREE.Object3D = bodyRoot;
+    // World-space path-following spine container (direct sibling of bodyRoot inside rig.group)
+    spineContainer = new THREE.Group();
+    group.add(spineContainer);
+
+    const segCount = clamp(Math.round(genome.segments), 8, 12);
+    const elong = genome.bodyElongation ?? 1.2;
     for (let i = 0; i < segCount; i++) {
       const t = i / Math.max(1, segCount - 1);
       const pivot = new THREE.Group();
-      pivot.position.set(0, i === 0 ? 0.06 : 0, i === 0 ? 0.16 : -0.24);
-      const taper = 1.0 - Math.pow(t, 1.35) * 0.76;
+      pivot.position.set(0, 0.04, -(0.14 + i * 0.21) * elong);
+      const taper = 1.0 - Math.pow(t, 1.35) * 0.72;
       const seg = new THREE.Mesh(geo.slitherSegment, i % 2 === 0 ? bodyMat : accentMat);
-      seg.scale.set(taper * 0.92, taper * 0.86, 0.88);
+      seg.scale.set(taper * 0.94, taper * 0.86, 0.94 * elong);
       seg.castShadow = true;
       pivot.add(seg);
 
       // Luminous lateral dorsal stripe nodules along the serpent spine
       if (i % 2 === 0 && i < segCount - 2) {
         const node = new THREE.Mesh(geo.sporeOrb, glowMat);
-        node.position.set(0, 0.16 * taper, 0);
+        node.position.set(0, 0.15 * taper, 0);
         node.scale.setScalar(0.42 * taper);
         pivot.add(node);
       }
 
-      parentObj.add(pivot);
+      spineContainer.add(pivot);
       segments.push({ pivot, index: i });
-      parentObj = pivot;
     }
 
-    headZ = 0.62;
+    headZ = 0.44;
     headY = 0.08;
-    tailZ = -segCount * 0.22;
+    tailZ = -0.14 * elong;
   } else {
     // spring_bouncer: bulbous elastic hopper torso + twin powerful coiled hind spring-legs!
     const torso = new THREE.Mesh(geo.bouncerBody, bodyMat);
@@ -463,9 +470,15 @@ export function createAnimalRig(
     addWingsPair(0.05, headY + 0.1, genome.limbSpan * 0.72, 0);
   } else if (genome.appendage === 'dorsal_sail') {
     const sail = new THREE.Mesh(geo.dorsalSail, wingMat);
-    sail.position.set(0, headY + 0.22, -0.05);
-    sail.scale.set(1.0, 1.1, 1.15);
-    bodyRoot.add(sail);
+    if (isSerpentine && segments.length > 2) {
+      sail.position.set(0, 0.16, 0);
+      sail.scale.set(0.85, 0.95, 0.95);
+      segments[2].pivot.add(sail);
+    } else {
+      sail.position.set(0, headY + 0.22, -0.05);
+      sail.scale.set(1.0, 1.1, 1.15);
+      bodyRoot.add(sail);
+    }
   } else if (genome.appendage === 'whip_antennae' || genome.sensoryOrgan === 'chemo_antennae') {
     for (const side of [-1, 1]) {
       const aPivot = new THREE.Group();
@@ -483,13 +496,18 @@ export function createAnimalRig(
       antennae.push({ pivot: aPivot, side });
     }
   } else if (genome.appendage === 'spore_plumes') {
+    const plumeHost = isSerpentine && segments.length > 1 ? segments[1].pivot : bodyRoot;
     for (const side of [-1, 1]) {
       const plume = new THREE.Mesh(geo.sporePlume, wingMat);
-      plume.position.set(side * 0.12, headY + 0.14, -0.15);
+      if (isSerpentine) {
+        plume.position.set(side * 0.11, 0.12, 0);
+      } else {
+        plume.position.set(side * 0.12, headY + 0.14, -0.15);
+      }
       plume.rotation.z = -side * 0.55;
       plume.rotation.x = -0.4;
       plume.scale.setScalar(0.45);
-      bodyRoot.add(plume);
+      plumeHost.add(plume);
     }
   } else if (genome.appendage === 'prehension_claws') {
     for (const side of [-1, 1]) {
@@ -503,12 +521,17 @@ export function createAnimalRig(
     }
   } else if (genome.appendage === 'tail_fronds' && !tailPivot) {
     tailPivot = new THREE.Group();
-    tailPivot.position.set(0, headY - 0.04, tailZ);
     const frond = new THREE.Mesh(geo.tailFrond, wingMat);
     frond.rotation.x = -Math.PI * 0.5;
     frond.scale.setScalar(0.75);
     tailPivot.add(frond);
-    bodyRoot.add(tailPivot);
+    if (isSerpentine && segments.length > 0) {
+      tailPivot.position.set(0, 0.0, tailZ);
+      segments[segments.length - 1].pivot.add(tailPivot);
+    } else {
+      tailPivot.position.set(0, headY - 0.04, tailZ);
+      bodyRoot.add(tailPivot);
+    }
   }
 
   // === COMPOSABLE FUNCTIONAL PARTS ===
@@ -542,19 +565,34 @@ export function createAnimalRig(
     bodyRoot.add(lurePivot);
   }
   if (genome.functionalPart === 'chitin_spines' || isSpined) {
-    for (let s = 0; s < 4; s++) {
-      const sp = new THREE.Mesh(geo.chitinSpine, accentMat);
-      sp.position.set(0, headY + 0.14, 0.22 - s * 0.18);
-      sp.rotation.x = -0.85;
-      bodyRoot.add(sp);
+    if (isSerpentine && segments.length > 3) {
+      for (let s = 0; s < 4 && s + 1 < segments.length - 1; s++) {
+        const sp = new THREE.Mesh(geo.chitinSpine, accentMat);
+        sp.position.set(0, 0.14, 0);
+        sp.rotation.x = -0.85;
+        sp.scale.setScalar(0.88 - s * 0.08);
+        segments[s + 1].pivot.add(sp);
+      }
+    } else {
+      for (let s = 0; s < 4; s++) {
+        const sp = new THREE.Mesh(geo.chitinSpine, accentMat);
+        sp.position.set(0, headY + 0.14, 0.22 - s * 0.18);
+        sp.rotation.x = -0.85;
+        bodyRoot.add(sp);
+      }
     }
   }
   if (genome.functionalPart === 'venom_stinger') {
     const stinger = new THREE.Mesh(geo.venomStinger, glowMat);
-    stinger.position.set(0, headY + 0.06, tailZ);
     stinger.rotation.y = Math.PI;
     stinger.rotation.x = -0.55;
-    bodyRoot.add(stinger);
+    if (isSerpentine && segments.length > 0) {
+      stinger.position.set(0, 0.04, tailZ);
+      segments[segments.length - 1].pivot.add(stinger);
+    } else {
+      stinger.position.set(0, headY + 0.06, tailZ);
+      bodyRoot.add(stinger);
+    }
   }
   if (genome.functionalPart === 'vocal_sac') {
     vocalSacMesh = new THREE.Mesh(geo.vocalSac, glowMat);
@@ -562,10 +600,19 @@ export function createAnimalRig(
     bodyRoot.add(vocalSacMesh);
   }
   if (genome.functionalPart === 'armored_plates') {
-    const plate = new THREE.Mesh(geo.armorPlate, accentMat);
-    plate.position.set(0, headY + 0.12, 0.02);
-    plate.scale.set(0.88, 0.72, 1.15);
-    bodyRoot.add(plate);
+    if (isSerpentine && segments.length > 3) {
+      for (const idx of [1, 3]) {
+        const plate = new THREE.Mesh(geo.armorPlate, accentMat);
+        plate.position.set(0, 0.1, 0);
+        plate.scale.set(0.72, 0.62, 0.85);
+        segments[idx].pivot.add(plate);
+      }
+    } else {
+      const plate = new THREE.Mesh(geo.armorPlate, accentMat);
+      plate.position.set(0, headY + 0.12, 0.02);
+      plate.scale.set(0.88, 0.72, 1.15);
+      bodyRoot.add(plate);
+    }
   }
   if (genome.functionalPart === 'pollen_baskets' || genome.diet === 'Nectarivore') {
     const polMat = new THREE.MeshStandardMaterial({
@@ -575,11 +622,12 @@ export function createAnimalRig(
       roughness: 0.4,
     });
     materials.push(polMat);
+    const pollenHost = isSerpentine && segments.length > 1 ? segments[1].pivot : bodyRoot;
     for (const side of [-1, 1]) {
       const pb = new THREE.Mesh(geo.pollenBasket, polMat);
-      pb.position.set(side * 0.18, headY - 0.08, -0.14);
+      pb.position.set(side * 0.18, isSerpentine ? 0.0 : headY - 0.08, isSerpentine ? 0 : -0.14);
       pb.visible = false;
-      bodyRoot.add(pb);
+      pollenHost.add(pb);
       pollenMeshes.push(pb);
     }
   }
@@ -594,7 +642,7 @@ export function createAnimalRig(
   morselGroup.add(fleshMorselMesh, floraMorselMesh);
   bodyRoot.add(morselGroup);
 
-  const baseBodyScale = new THREE.Vector3(1.0, 1.0, genome.bodyElongation);
+  const baseBodyScale = new THREE.Vector3(1.0, 1.0, isSerpentine ? 1.0 : genome.bodyElongation);
   bodyRoot.scale.copy(baseBodyScale);
 
   disableFrustumCulling(group);
@@ -602,6 +650,8 @@ export function createAnimalRig(
   return {
     group,
     bodyRoot,
+    spineContainer,
+    isSerpentine,
     materials,
     bodyMat,
     accentMat,
@@ -630,6 +680,17 @@ export function createAnimalRig(
 }
 
 const _tmpCol = new THREE.Color();
+const _invGroupQuat = new THREE.Quaternion();
+const _segWorldQuat = new THREE.Quaternion();
+const _segLocalPos = new THREE.Vector3();
+const _segFwd = new THREE.Vector3();
+const _segAhead = new THREE.Vector3();
+const _segBehind = new THREE.Vector3();
+const _segUp = new THREE.Vector3();
+const _segRight = new THREE.Vector3();
+const _segMat = new THREE.Matrix4();
+const _wUp = new THREE.Vector3(0, 1, 0);
+const _altUp = new THREE.Vector3(0, 0, 1);
 
 export function updateAnimalRig(
   rig: ArticulatedAnimalRig,
@@ -639,7 +700,8 @@ export function updateAnimalRig(
 ): void {
   rig.group.position.copy(a.position);
   rig.group.quaternion.copy(a.quaternion);
-  rig.group.scale.setScalar(a.scale);
+  const emergeScale = a.emergeAnim > 0.001 ? 1.0 - 0.82 * a.emergeAnim * a.emergeAnim : 1.0;
+  rig.group.scale.setScalar(Math.max(0.01, a.scale * emergeScale));
 
   const g = a.genome;
 
@@ -720,14 +782,80 @@ export function updateAnimalRig(
 
   // 4. Serpentine slithering & armored crawler segment undulation
   if (rig.segments.length > 0) {
-    const isSlither = g.locomotion === 'slithering';
-    const amp = (isSlither ? 0.38 : 0.08) * (0.35 + clamp(a.speedRatio, 0, 1.3) * 0.75);
-    for (let i = 0; i < rig.segments.length; i++) {
-      const s = rig.segments[i];
-      const wave = Math.sin(a.slitherPhase - s.index * 0.68);
-      if (isSlither) {
-        s.pivot.rotation.y = wave * amp;
-      } else {
+    if (rig.isSerpentine && a.slitherSpine && a.slitherSpine.length >= rig.segments.length + 1) {
+      // World-space zero-slip path-following serpentine spine transformed into rig.group local space
+      _invGroupQuat.copy(a.quaternion).invert();
+      const invScale = 1.0 / Math.max(0.01, a.scale);
+      const spine = a.slitherSpine;
+
+      for (let i = 0; i < rig.segments.length; i++) {
+        const s = rig.segments[i];
+        const prevPos = spine[i];
+        const worldPos = spine[i + 1];
+        const nextPos = i + 2 < spine.length ? spine[i + 2] : null;
+
+        // Smooth centered spine tangent pointing toward the head
+        if (nextPos) {
+          _segFwd.subVectors(prevPos, nextPos);
+        } else {
+          _segFwd.subVectors(prevPos, worldPos);
+        }
+        if (!safeNormalize(_segFwd)) {
+          _segFwd.set(0, 0, 1).applyQuaternion(a.quaternion);
+        }
+
+        // Subtle flank banking/roll driven by local horizontal S-curve bend
+        let roll = 0;
+        if (nextPos) {
+          _segAhead.subVectors(prevPos, worldPos);
+          _segBehind.subVectors(worldPos, nextPos);
+          const lenA = Math.hypot(_segAhead.x, _segAhead.z);
+          const lenB = Math.hypot(_segBehind.x, _segBehind.z);
+          if (lenA > 1e-4 && lenB > 1e-4) {
+            const crossY = (_segAhead.x * _segBehind.z - _segAhead.z * _segBehind.x) / (lenA * lenB);
+            roll = clamp(crossY * 0.52, -0.26, 0.26);
+          }
+        }
+
+        // Terrain-conforming surface normal (blending smoothly toward world up when airborne from cairn)
+        const segFloor = getTerrainHeight(worldPos.x, worldPos.z);
+        const airBlend = clamp((worldPos.y - segFloor - 0.28 * a.scale) / 0.85, 0, 1);
+        getTerrainNormal(worldPos.x, worldPos.z, _segUp);
+        if (airBlend > 0.001) {
+          _segUp.lerp(_wUp, airBlend).normalize();
+        }
+
+        const upRef = Math.abs(_segFwd.dot(_segUp)) > 0.95 ? _altUp : _segUp;
+        _segRight.crossVectors(upRef, _segFwd);
+        if (!safeNormalize(_segRight)) _segRight.set(1, 0, 0);
+        _segUp.crossVectors(_segFwd, _segRight);
+        safeNormalize(_segUp);
+
+        if (Math.abs(roll) > 1e-4) {
+          const c = Math.cos(roll);
+          const sn = Math.sin(roll);
+          const rx = _segRight.x * c + _segUp.x * sn;
+          const ry = _segRight.y * c + _segUp.y * sn;
+          const rz = _segRight.z * c + _segUp.z * sn;
+          const ux = _segUp.x * c - _segRight.x * sn;
+          const uy = _segUp.y * c - _segRight.y * sn;
+          const uz = _segUp.z * c - _segRight.z * sn;
+          _segRight.set(rx, ry, rz);
+          _segUp.set(ux, uy, uz);
+        }
+
+        _segMat.makeBasis(_segRight, _segUp, _segFwd);
+        _segWorldQuat.setFromRotationMatrix(_segMat);
+
+        _segLocalPos.subVectors(worldPos, a.position).applyQuaternion(_invGroupQuat).multiplyScalar(invScale);
+        s.pivot.position.copy(_segLocalPos);
+        s.pivot.quaternion.copy(_invGroupQuat).multiply(_segWorldQuat);
+      }
+    } else if (!rig.isSerpentine) {
+      const amp = 0.08 * (0.35 + clamp(a.speedRatio, 0, 1.3) * 0.75);
+      for (let i = 0; i < rig.segments.length; i++) {
+        const s = rig.segments[i];
+        const wave = Math.sin(a.slitherPhase - s.index * 0.68);
         s.pivot.position.x = wave * amp * 0.45;
       }
     }
@@ -749,7 +877,9 @@ export function updateAnimalRig(
     m.pivot.rotation.y = m.baseY + m.side * open;
   }
   if (rig.tailPivot) {
-    rig.tailPivot.rotation.y = Math.sin(a.wingPhase * 0.75 + a.gaitPhase * 0.5) * 0.26;
+    rig.tailPivot.rotation.y = rig.isSerpentine
+      ? Math.sin(a.slitherPhase - rig.segments.length * 0.55) * 0.22
+      : Math.sin(a.wingPhase * 0.75 + a.gaitPhase * 0.5) * 0.26;
   }
   if (rig.lurePivot) {
     rig.lurePivot.rotation.z = Math.sin(simTime * 3.2 + a.id) * 0.16;
@@ -784,7 +914,7 @@ export function updateAnimalRig(
 
   // Bioluminescence, molt flash, courtship shimmer, hit flash & elder weathering
   const nightGlow = 1.0 + (1.0 - daylight) * 0.95;
-  const specialFlash = a.hitFlash * 2.8 + a.moltAnim * 1.45 + a.courtshipAnim * 1.35;
+  const specialFlash = a.hitFlash * 2.8 + a.moltAnim * 1.45 + a.courtshipAnim * 1.35 + a.emergeAnim * 1.75;
   const elderDim = 1.0 - a.elderRatio * 0.45;
   rig.bodyMat.emissiveIntensity = (rig.baseEmissive * nightGlow * elderDim) + specialFlash;
   rig.glowMat.emissiveIntensity = (rig.glowEmissive * nightGlow * elderDim) + specialFlash * 1.25;

@@ -225,7 +225,10 @@ export class HudController {
     this.statPlantsEl.textContent = String(plants);
     this.statFungiEl.textContent = String(fungi);
     this.statSpeciesEl.textContent = String(this.sim.speciesRegistry.getExtantCount());
-    this.statCairnEl.textContent = `${Math.max(0, Math.ceil(this.sim.genesisTimer))}s`;
+    this.statCairnEl.textContent =
+      this.sim.pendingCairnEmissions.length > 0
+        ? `+${this.sim.pendingCairnEmissions.length}`
+        : `${Math.max(0, Math.ceil(this.sim.genesisTimer))}s`;
     this.statFpsEl.textContent = String(fps);
 
     const dl = computeDaylightFactor(this.sim.env.timeOfDay);

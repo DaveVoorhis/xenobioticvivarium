@@ -281,7 +281,9 @@ export class SceneRenderer {
       this.attachEntityRef(rig.group, entity);
       rig.group.position.copy(entity.position);
       rig.group.quaternion.copy(entity.quaternion);
-      rig.group.scale.setScalar(entity.scale);
+      const emergeScale =
+        entity.emergeAnim > 0.001 ? 1.0 - 0.82 * entity.emergeAnim * entity.emergeAnim : 1.0;
+      rig.group.scale.setScalar(Math.max(0.01, entity.scale * emergeScale));
       this.scene.add(rig.group);
       this.animalRigs.set(entity.id, rig);
     } else if (entity.kind === 'plant') {

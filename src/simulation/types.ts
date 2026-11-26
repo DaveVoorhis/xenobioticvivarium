@@ -40,6 +40,7 @@ export interface AnimalEntity extends BaseEntity {
   lifeStage: AnimalLifeStage;
   instarRank: number;
   moltAnim: number;
+  emergeAnim: number;
   elderRatio: number;
   activeTarget: ActiveTarget | null;
   offspringCount: number;
@@ -71,6 +72,9 @@ export interface AnimalEntity extends BaseEntity {
   wingPhase: number;
   gaitPhase: number;
   slitherPhase: number;
+  slitherHeading: number;
+  slitherTrail?: THREE.Vector3[];
+  slitherSpine?: THREE.Vector3[];
   speedRatio: number;
   wanderDir: THREE.Vector3;
   wanderTimer: number;
